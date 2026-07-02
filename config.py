@@ -1,0 +1,56 @@
+"""
+全局配置
+"""
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+class Config:
+    """应用配置 - 集中管理所有配置参数"""
+
+    # 服务
+    HOST = "0.0.0.0"
+    PORT = 8000
+    DEBUG = True
+
+    # 数据库
+    DB_PATH = "data/agricultural_news.db"
+
+    # 爬虫
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    REQUEST_TIMEOUT = 15
+    REQUEST_DELAY = 2.0
+    MAX_RETRIES = 3
+    MAX_NEWS_PER_SOURCE = 50
+
+    # NLP
+    MODEL_MODE = "mock"  # "mock" 或 "local"
+    NUM_CLASSES = 6
+    CATEGORY_LABELS = ["政策法规", "市场行情", "农业科技", "灾害预警", "国际农业", "综合资讯"]
+    MAX_INPUT_LENGTH = 512
+    MAX_SUMMARY_LENGTH = 128
+    HOT_TOPIC_WINDOW_DAYS = 7
+    TOP_K_KEYWORDS = 20
+
+    # 调度器
+    SCHEDULER_ENABLED = True
+    CRAWL_INTERVAL_MINUTES = 60
+    ANALYSIS_INTERVAL_MINUTES = 30
+
+    # 路径
+    BASE_DIR = Path(__file__).parent
+    DATA_DIR = BASE_DIR / "data"
+    RAW_DIR = DATA_DIR / "raw"
+    PROCESSED_DIR = DATA_DIR / "processed"
+    DB_DIR = DATA_DIR
+
+    @classmethod
+    def ensure_dirs(cls):
+        cls.RAW_DIR.mkdir(parents=True, exist_ok=True)
+        cls.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        cls.DB_DIR.mkdir(parents=True, exist_ok=True)
+        (cls.DATA_DIR / "models").mkdir(parents=True, exist_ok=True)
+
+
+config = Config()
