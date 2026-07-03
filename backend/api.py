@@ -43,8 +43,14 @@ async def handle_categories(request):
     return json_resp({"categories":config.CATEGORY_LABELS})
 async def handle_disasters(request):
     limit = int(request.query.get("limit","50"))
-    try: return json_resp(get_db().get_active_disasters(limit))
-    except Exception as e: return json_resp({"error":str(e)},500)
+    try:
+        result = get_db().get_active_disasters(limit)
+        if not result:
+            # 回退到新闻表中分类为"灾害预警"的文章
+            result = get_db().get_all_news(limit, 0, "灾害预警")
+        return json_resp(result)
+    except Exception as e:
+        return json_resp({"error":str(e)},500)
 async def handle_analysis(request):
     try:
         results = get_db().get_recent_analysis("full_analysis")
