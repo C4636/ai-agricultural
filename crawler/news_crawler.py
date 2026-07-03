@@ -191,7 +191,6 @@ class AgriculturalNewsCrawler:
                     if link.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx", ".jpg", ".png")):
                         continue
                     if link and not link.startswith("http"):
-                    if link and not link.startswith("http"):
                         link = urljoin(source.url, link)
                     # Fix CMA double-path: links are root-relative, strip source dir prefix
                     import urllib.parse
