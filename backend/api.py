@@ -32,7 +32,10 @@ async def handle_news(request):
     end = request.query.get("end_date",None)
     kw = request.query.get("keyword",None)
     try:
-        if kw: return json_resp(get_db().search_news(kw, limit))
+        if kw:
+            if start and end:
+                return json_resp(get_db().get_news_by_keyword_and_date(kw, start, end, limit))
+            return json_resp(get_db().search_news(kw, limit))
         if start and end: return json_resp(get_db().get_news_by_date_range(start, end, limit))
         return json_resp(get_db().get_all_news(limit, offset, cat))
     except Exception as e: return json_resp({"error":str(e)},500)
@@ -124,114 +127,55 @@ async def handle_weather(request):
     except Exception as e:
         return json_resp({"error": str(e), "city": city}, 200)
 
-def _parse_date_from_text(text):
-    """从文本中提取日期，支持多种格式"""
-    text = text.strip()
-    # YYYY-MM-DD 或 YYYY/MM/DD
-    m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', text)
-    if m: return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    # YYYY年MM月DD日
-    m = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', text)
-    if m: return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    # MM-DD（假设当前年份）
-    m = re.search(r'(?<!\d)(\d{1,2})[-/](\d{1,2})(?!\d)', text)
-    if m:
-        mon, day = int(m.group(1)), int(m.group(2))
-        if 1 <= mon <= 12 and 1 <= day <= 31:
-            return f"{datetime.now().year}-{mon:02d}-{day:02d}"
-    return None
-
-def _parse_date_from_url(url):
-    """从URL路径中提取日期，如 /2026/0702/xxx 或 /20260702/xxx"""
-    m = re.search(r'/(\d{4})/(\d{2})(\d{2})/', url)
-    if m: return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    m = re.search(r'/(\d{4})(\d{2})(\d{2})/', url)
-    if m: return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    return None
-
 async def handle_crawl(request):
-    """Manual crawl trigger"""
-    import urllib.request, hashlib, re
-    from urllib.parse import urljoin, quote
-    from lxml import html as lxml_html
+    """Manual crawl trigger - 复用 AgriculturalNewsCrawler 的成熟爬取逻辑"""
     from nlp import NewsClassifier, SentimentAnalyzer, HotTopicAnalyzer
-    from crawler.sources import NEWS_SOURCES
+    from crawler.news_crawler import AgriculturalNewsCrawler
+
     # 清除旧数据
     c = get_db().conn.cursor()
     c.execute("DELETE FROM news_articles")
     c.execute("DELETE FROM analysis_results")
     get_db().conn.commit()
     logger.info("已清空旧新闻和旧分析结果，准备重新爬取。")
-    clf2 = NewsClassifier(); sa2 = SentimentAnalyzer(); ha2 = HotTopicAnalyzer()
-    all_a = []
-    today = datetime.now().strftime("%Y-%m-%d")
-    for src in NEWS_SOURCES:
-        try:
-            url2 = quote(src.url, safe=":/?#[]@!$()*+,;=-_.~%")
-            req = urllib.request.Request(url2, headers={"User-Agent":"Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
-            doc = lxml_html.fromstring(html)
-            items = doc.cssselect(src.article_selector)
-            for item in items[:config.MAX_NEWS_PER_SOURCE]:
-                el = None
-                if src.date_selector:
-                    found = item.cssselect(src.date_selector)
-                else:
-                    found = item.cssselect('.date, .time, span.date, span.time, em, small')
-                date_str = None
-                for de in found:
-                    dt = _parse_date_from_text(de.text_content())
-                    if dt: date_str = dt; break
-                if src.title_selector:
-                    found = item.cssselect(src.title_selector)
-                    if found: el = found[0]
-                elif item.tag == "a": el = item
-                elif item.xpath(".//a"): el = item.xpath(".//a")[0]
-                if el is None: continue
-                title = el.text_content().strip()
-                link = el.get("href", "")
-                if not title or len(title) < 5: continue
-                if title in ["农业要闻","中心动态","全国信息联播","通知公告","更多","首页","机构","资讯"]: continue
-                if link and not link.startswith("http"): link = urljoin(src.url, link)
-                # 尝试从URL提取日期
-                if not date_str:
-                    date_str = _parse_date_from_url(link)
-                all_a.append({"id":hashlib.md5((link+title).encode("utf-8")).hexdigest(),
-                    "title":title,"url":link,"source":src.name,
-                    "date":date_str or today,
-                    "content":"","summary":"","category":"","sentiment":"",
-                    "sentiment_score":0.5,"risk_score":0.0,"crawled_at":today})
-        except Exception:
-            pass
-    for a in all_a:
-        a["category"] = clf2.classify(a.get("title",""))["category"]
-        r2 = sa2.analyze(a.get("title",""))
-        a["sentiment"] = r2["label"]; a["sentiment_score"] = r2["score"]; a["risk_score"] = r2.get("risk_score",0.0)
+
+    # 使用 AgriculturalNewsCrawler 进行爬取（含重试、正确超时15s、URL优先日期解析、20页分页）
+    crawler = AgriculturalNewsCrawler()
+    all_a = crawler.crawl_all()
+
+    # NLP 分析
     if all_a:
+        clf2 = NewsClassifier()
+        sa2 = SentimentAnalyzer()
+        ha2 = HotTopicAnalyzer()
+
+        for a in all_a:
+            a["category"] = clf2.classify(a.get("title", ""))["category"]
+            r2 = sa2.analyze(a.get("title", ""))
+            a["sentiment"] = r2["label"]
+            a["sentiment_score"] = r2["score"]
+            a["risk_score"] = r2.get("risk_score", 0.0)
+
         saved = get_db().save_news(all_a)
         arts = get_db().get_all_news(500)
-        logger.info(f"[DEBUG] 爬取新闻 {len(all_a)} 条, 保存 {saved} 条, 读取 {len(arts)} 条")
-        # 检查文章有无日期
-        empty_date = [a for a in arts if not a.get("date","")]
-        dates_found = sorted(set(a.get("date","")[:10] for a in arts if a.get("date","")))
-        logger.info(f"[DEBUG] 空日期文章: {len(empty_date)} 条, 日期分布: {dates_found}")
-        # 检查类别分布
+        logger.info(f"[CRAWL] 爬取 {len(all_a)} 条, 保存 {saved} 条, DB中 {len(arts)} 条")
+
+        # 检查日期分布
+        dates_found = sorted(set(a.get("date", "")[:10] for a in arts if a.get("date", "")))
+        logger.info(f"[CRAWL] 日期分布: {dates_found}")
         cats_found = {}
         for a in arts:
-            c = a.get("category","")
-            cats_found[c] = cats_found.get(c,0)+1
-        logger.info(f"[DEBUG] 类别分布: {cats_found}")
-        # 计算趋势
+            c = a.get("category", "")
+            cats_found[c] = cats_found.get(c, 0) + 1
+        logger.info(f"[CRAWL] 类别分布: {cats_found}")
+
+        # 趋势分析
         trend_data = ha2.trend_over_time(arts)
-        logger.info(f"[DEBUG] trend_over_time 结果: {json.dumps(trend_data, ensure_ascii=False)}")
         get_db().save_analysis("full_analysis", ha2.full_analysis(arts))
-        get_db().save_analysis("hot_keywords", {"keywords":ha2.extract_keywords([a.get("title","") for a in arts],30)})
-        get_db().save_analysis("trend", {"trend":trend_data})
-        # 验证保存
-        saved_trend = get_db().get_recent_analysis("trend")
-        logger.info(f"[DEBUG] 从DB读取趋势数据: {saved_trend[:1] if saved_trend else '空'}")
-    return json_resp({"crawled":len(all_a),"total":get_db().get_statistics()["total_news"]})
+        get_db().save_analysis("hot_keywords", {"keywords": ha2.extract_keywords([a.get("title", "") for a in arts], 30)})
+        get_db().save_analysis("trend", {"trend": trend_data})
+
+    return json_resp({"crawled": len(all_a), "total": get_db().get_statistics()["total_news"]})
 def create_app():
     app = web.Application()
     app.router.add_get("/", handle_dashboard)
